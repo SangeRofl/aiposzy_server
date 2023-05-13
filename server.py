@@ -3,8 +3,11 @@ import sys
 import os
 from email.parser import Parser
 
+from loguru import logger
+
 from functools import lru_cache
 from urllib.parse import parse_qs, urlparse
+logger.add("debug.log", format = "{time} {level} {message}")
 
 MAX_LINE = 64*1024
 MAX_HEADERS = 100
@@ -26,8 +29,10 @@ class MyHTTPServer:
 
             while True:
                 conn, _ = serv_sock.accept()
+                logger.info("Client connected"+ str(_))
                 try:
                     self.serve_client(conn)
+                    logger.info("Client served successfuly")
                 except Exception as e:
                     print('Client serving failed', e)
         finally:
@@ -37,17 +42,21 @@ class MyHTTPServer:
     def serve_client(self, conn):
         try:
             req = self.parse_request(conn)
+            logger.info("Request parserd successfuly:"+req.method+req.target+req.version)
             resp = self.handle_request(req)
+            logger.info("Request handled successfuly:"+resp.reason + resp.status)
             self.send_response(conn, resp)
         except ConnectionResetError:
-            conn = None
+            raise
         except KeyboardInterrupt:
             raise
         except Exception as e:
             self.send_error(conn, e)
+            logger.error("Error:"+ e.status)
 
         if conn:
             conn.close()
+            logger.info("Connection closed")
 
 
     def parse_request(self, conn):
@@ -98,19 +107,53 @@ class MyHTTPServer:
 
 
     def handle_request(self, req):
+        allowed_extensions = [".html", ".css", ".js", ".txt", ".py", ".svg", ".png", ]
         body = ""
-
-        contentType = 'text/html; charset=utf-8'
+        contentType = ''
+        headers = []
         if req.method == 'GET':
-            body = "\n<br>".join(os.listdir('.'+req.path))
-            body = body.encode('utf-8')
-        if req.method == 'POST':
-            file = open("."+req.path+"/"+req.query['file'][0], "r")
-            body = file.read()
-            file.close()
-            body = body.encode('utf-8')
-        headers = [('Content-Type', contentType),
-                ('Content-Length', len(body))]
+            print(req.path)
+            if req.path.endswith(tuple(allowed_extensions)):
+                file = open("."+req.path,"rt") if req.path.endswith(tuple(allowed_extensions[:6])) else open("."+req.path,"rb")
+                body = file.read()
+                file.close()
+                if req.path.endswith(".html"):
+                    body = body.encode("utf-8")
+                    contentType = 'text/html; charset=utf-8'
+                elif req.path.endswith(".css"):
+                    contentType = 'text/css; charset=utf-8'
+                    body = body.encode("utf-8")
+                elif req.path.endswith(".js"):
+                    body = body.encode("utf-8")
+                    contentType = 'text/javascript; charset=utf-8'
+                elif req.path.endswith(tuple(allowed_extensions[3:6])):
+                    contentType = 'text; charset=utf-8'
+                    body = body.encode("utf-8")
+                elif req.path.endswith(".svg"):
+                    contentType = 'image/svg+xml'
+                elif req.path.endswith(".png"):
+                    contentType = 'image/png'
+            else:
+                body+="<html><head></head><body>"
+                print(os.path.join(os.path.abspath("."),req.path[1:]))
+                path = os.path.relpath(os.path.join(os.path.abspath("."),req.path[1:]), os.path.abspath("."))+"/" if len(req.path) != 1 else "/"
+                body+="<base href = http://"+self._host+":"+str(self._port)+"/"+path.replace("\\", "/")+">"
+                folder_objects = [i if i.endswith(tuple(allowed_extensions)) else i+"/" for i in os.listdir('.'+req.path)]
+                a = ["<a href = " + i + ">" + i + "</a>" for i in os.listdir('.'+req.path)]
+                body += "\n<br>".join(a)
+                body+="</body></html>"
+                body = body.encode('utf-8')
+                contentType = 'text/html; charset=utf-8'
+        elif req.method == 'POST':
+            print(str(req.body()))
+        elif req.method == 'OPTIONS':
+            headers+=[('Allow', "OPTIONS, GET, POST"),]
+        else:
+            raise HTTPError(405, "Method not allowed")
+        headers += [('Content-Type', contentType),
+                ('Content-Length', len(body)),
+                ('Access-Control-Allow-Origin', "https://"+self._host+":"+str(self._port)),
+                ('Access-Control-Allow-Methods', 'GET, POST, OPTIONS'),]
         return Response(200, "OK", headers, body)
 
 
@@ -155,6 +198,11 @@ class Request:
         self.version = version
         self.headers = headers
         self.rfile = rfile
+    def body(self):
+        size = self.headers.get('Content-Length')
+        if not size:
+            return None
+        return self.rfile.read(size)
 
     @property
     def path(self):
@@ -170,12 +218,18 @@ class Request:
     def url(self):
         return urlparse(self.target)
 
-
 class Response:
   def __init__(self, status, reason, headers=None, body=None):
     self.status = status
     self.reason = reason
     self.headers = headers
+    self.body = body
+
+class HTTPError(Exception):
+  def __init__(self, status, reason, body=None):
+    super()
+    self.status = status
+    self.reason = reason
     self.body = body
 
 if __name__ == "__main__":
